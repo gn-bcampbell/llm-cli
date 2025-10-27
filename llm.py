@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-from pathlib import Path
 import sys
+from pathlib import Path
+
 import requests
 import warnings
 from rich.console import Console
@@ -12,15 +13,41 @@ warnings.filterwarnings("ignore", message=".*LibreSSL.*")
 
 console = Console()
 OLLAMA_API = "http://localhost:11434/api/generate"
+OLLAMA_TAGS_API = "http://localhost:11434/api/tags"
+DEFAULT_MODEL = "phi3:latest"
+ALIAS_MAP = {
+    "qwen": "qwen3-vl:235b-cloud",
+    "deepseek": "deepseek-r1:8b",
+    "phi3": "phi3:latest",
+}
+
+def resolve_model_name(requested_name):
+    """Map alias to actual model name in ollama"""
+    if not requested_name:
+        return requested_name
+
+    requested_name = requested_name.strip()
+    if not requested_name:
+        return requested_name
+
+    lowered = requested_name.lower()
+    for alias, actual in ALIAS_MAP.items():
+        if alias in lowered:
+            return actual
+
+    if requested_name in ALIAS_MAP.values():
+        return requested_name
+
+    raise ValueError("that model isn't available")
 
 def is_ollama_running():
     try:
-        requests.get("http://localhost:11434/api/tags", timeout=1)
+        requests.get(OLLAMA_TAGS_API, timeout=1)
         return True
     except requests.ConnectionError:
         return False
 
-def query_ollama(prompt, model="phi3"):
+def query_ollama(prompt, model=DEFAULT_MODEL):
     """Query Ollama's local API directly and return the model output."""
     response = requests.post(
         OLLAMA_API,
@@ -31,7 +58,7 @@ def query_ollama(prompt, model="phi3"):
     data = response.json()
     return data.get("response", "").strip()
 
-def summarise_file(file_path, model="phi3"):
+def summarise_file(file_path, model=DEFAULT_MODEL):
     """Read a file and summarise its contents using the local LLM."""
     path = Path(file_path)
     if not path.exists() or not path.is_file():
@@ -76,23 +103,24 @@ def main():
 
     verbose = "--verbose" in args
     raw = "--raw" in args
-    model = "phi3"
+    model = DEFAULT_MODEL
+    model_specified = False
 
     # Remove flags from args
-    if "--verbose" in args: args.remove("--verbose")
-    if "--raw" in args: args.remove("--raw")
+    # if "--verbose" in args: args.remove("--verbose")
+    # if "--raw" in args: args.remove("--raw")
     if "--model" in args:
         try:
             model_index = args.index("--model")
             model = args[model_index + 1]
             del args[model_index:model_index + 2]
+            model_specified = True
         except IndexError:
             console.print("[red]Missing model name after --model[/red]")
             sys.exit(1)
 
     # Handle summarise flag
     if "--summarise" in args:
-        # Support both spellings
         flag = "--summarise"
         try:
             idx = args.index(flag)
@@ -107,12 +135,21 @@ def main():
             console.print("Start it with: [yellow]brew services start ollama[/yellow]")
             sys.exit(1)
 
-        summarise_file(file_path, model=model)
+        try:
+            resolved_model = resolve_model_name(model)
+        except ValueError as err:
+            console.print(f"[bold red]{err}[/bold red]")
+            sys.exit(1)
+
+        if resolved_model != model and model_specified:
+            console.print(f"[cyan]Using model:[/cyan] {resolved_model} (matched from '{model}')")
+
+        summarise_file(file_path, model=resolved_model)
         sys.exit(0)
 
     # Handle normal question mode
-    if "--verbose" in args: args.remove("--verbose")
-    if "--raw" in args: args.remove("--raw")
+    # if "--verbose" in args: args.remove("--verbose")
+    # if "--raw" in args: args.remove("--raw")
     question = " ".join(args)
 
     if not is_ollama_running():
@@ -120,8 +157,17 @@ def main():
         console.print("Start it with: [yellow]brew services start ollama[/yellow]")
         sys.exit(1)
 
+    try:
+        resolved_model = resolve_model_name(model)
+    except ValueError as err:
+        console.print(f"[bold red]{err}[/bold red]")
+        sys.exit(1)
+
+    if resolved_model != model and model_specified:
+        console.print(f"[cyan]Using model:[/cyan] {resolved_model} (matched from '{model}')")
+
     if verbose:
-        console.print(f"[bold cyan]🤖 Asking local LLM:[/bold cyan] {question}\n")
+        console.print(f"[bold cyan]🤖 Asking local LLM ({resolved_model}):[/bold cyan] {question}\n")
 
     prompt = (
         "You are a concise command-line assistant. "
@@ -130,7 +176,7 @@ def main():
     )
 
     try:
-        answer = query_ollama(prompt, model=model)
+        answer = query_ollama(prompt, model=resolved_model)
         if raw:
             print(answer)
         else:
